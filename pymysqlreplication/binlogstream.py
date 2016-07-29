@@ -4,6 +4,7 @@ import pymysql
 import struct
 
 from pymysql.constants.COMMAND import COM_BINLOG_DUMP, COM_REGISTER_SLAVE
+from .constants.FLAG import FLAG_STMT_END_F, FLAG_NO_FOREIGN_KEY_CHECKS_F, FLAG_RELAXED_UNIQUE_CHECKS_F, FLAG_COMPLETE_ROWS_F
 from pymysql.cursors import DictCursor
 from pymysql.util import int2byte
 
@@ -175,6 +176,7 @@ class BinLogStreamReader(object):
 
         # Store table meta information
         self.table_map = {}
+        self.dict_table_id = {}	
         self.log_pos = log_pos
         self.log_file = log_file
         self.auto_position = auto_position
@@ -395,8 +397,9 @@ class BinLogStreamReader(object):
 
             if binlog_event.event_type == TABLE_MAP_EVENT and \
                     binlog_event.event is not None:
-                self.table_map[binlog_event.event.table_id] = \
-                    binlog_event.event.get_table()
+		if binlog_event.event.table_id not in self.table_map:
+                    self.table_map[binlog_event.event.table_id] = binlog_event.event.get_table()
+                    self.__manage_table_map(binlog_event.event.table_id)
 
             if binlog_event.event_type == ROTATE_EVENT:
                 self.log_pos = binlog_event.event.position
@@ -475,6 +478,43 @@ class BinLogStreamReader(object):
                     continue
                 else:
                     raise error
+    def __manage_if_last_event_of_statement(self,  last_event_statement):
+        """
+        looking for flags to FLAG_STMT_END_F
+        if event is the last event of a statement
+        """
+        for row_event in last_event_statement:
+            if isinstance(event, row_event):
+                if event.flags & FLAG_STMT_END_F :
+                    key = "%s.%s" % (self.table_map[event.table_id].schema,self.table_map[event.table_id].table)
 
+                    # key exists ?
+                    if key in self.dict_table_id:
+                        # keep the last one
+                        del self.dict_table_id[key]
+
+                    # id exists ?
+                    if event.table_id in self.table_map:
+                        # del it
+                        del self.table_map[event.table_id]
+                    break
+
+    def __manage_table_map(self,  new_table_id):
+        """
+        # added by YD - 2013/12/12
+        Looking for a duplicate entry in self.table_map (same schema.table with old table_id)
+        from the new_table_id
+        """
+        key = "%s.%s" % (self.table_map[new_table_id].schema,self.table_map[new_table_id].table)
+
+        # key exists ?
+        if key in self.dict_table_id:
+            # get old entry
+
+            if self.dict_table_id[key] in self.table_map:
+                # del it
+                del self.table_map[self.dict_table_id[key]]
+        # keep the last one
+        self.dict_table_id[key] = new_table_id
     def __iter__(self):
         return iter(self.fetchone, None)
